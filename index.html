@@ -1,0 +1,224 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Varal</title>
+<style>
+:root{--bg:#f6f4ef;--fg:#1c1b19;--card:#fff;--line:#d8d4ca;--accent:#2563eb}
+@media (prefers-color-scheme:dark){:root{--bg:#1a1a1c;--fg:#ecebe8;--card:#26262a;--line:#3a3a40;--accent:#6ea0ff}}
+*{box-sizing:border-box}
+body{margin:0;font:16px/1.4 system-ui,sans-serif;background:var(--bg);color:var(--fg)}
+main{max-width:860px;margin:0 auto;padding:16px}
+h1,h3{margin:.4em 0 .3em}
+input,button{font:inherit;padding:8px 12px;border-radius:8px;border:1px solid var(--line);background:var(--card);color:var(--fg)}
+button{cursor:pointer}
+button:disabled{opacity:.45;cursor:default}
+button.primary{background:var(--accent);color:#fff;border-color:var(--accent)}
+.row{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.panel{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px;margin:10px 0}
+.panel.turn{border-color:var(--accent);border-width:2px}
+.cards{display:flex;flex-wrap:wrap;gap:8px;min-height:40px}
+.card{display:flex;flex-direction:column;align-items:center;justify-content:center;width:84px;height:84px;border-radius:10px;border:3px solid var(--c,#888);background:var(--card);color:var(--fg);padding:4px;font-size:12px}
+.card span{font-size:26px}
+.card.sel{outline:3px solid var(--accent);transform:translateY(-4px)}
+.muted{opacity:.7;font-size:14px}
+#msg{color:#c2410c;min-height:1.4em;font-weight:600}
+.code{font-size:32px;letter-spacing:6px;font-weight:700}
+.log{font-size:13px;max-height:160px;overflow:auto}
+</style>
+</head>
+<body>
+<main>
+<h1>🧺 Varal</h1>
+<div id="msg"></div>
+<div id="app"></div>
+</main>
+<script>
+const $ = s => document.querySelector(s);
+const COL = {vermelho:'#e5484d', azul:'#3b82f6', verde:'#30a46c', amarelo:'#f5c518'};
+const ICON = {camisa:'👕', calca:'👖', meia:'🧦', lencol:'🛏️', acao:'✨'};
+const NAME = {camisa:'camisa', calca:'calça', meia:'meia', lencol:'lençol', acao:'ação'};
+const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+const S = {code:null, token:null, state:null, json:'', selHand:null, selPieces:[]};
+try { const x = JSON.parse(localStorage.getItem('varal')); if (x) { S.code = x.code; S.token = x.token; } } catch (e) {}
+
+let msgTimer;
+function msg(t) { $('#msg').textContent = t || ''; clearTimeout(msgTimer); if (t) msgTimer = setTimeout(() => $('#msg').textContent = '', 6000); }
+
+async function api(path, body) {
+  const r = await fetch(path, body === undefined ? {} : {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) { const e = new Error(typeof d.detail === 'string' ? d.detail : 'Requisição inválida.'); e.status = r.status; throw e; }
+  return d;
+}
+
+function setSession(code, token) {
+  S.code = code; S.token = token;
+  try { localStorage.setItem('varal', JSON.stringify({code, token})); } catch (e) {}
+}
+function clearSession() {
+  S.code = S.token = S.state = null; S.json = ''; S.selHand = null; S.selPieces = [];
+  try { localStorage.removeItem('varal'); } catch (e) {}
+}
+function setState(v) {
+  S.state = v; S.json = JSON.stringify(v);
+  const g = v.game;
+  if (g) {
+    const me = g.players[v.you_index];
+    if (!me.hand.some(c => c.id === S.selHand)) S.selHand = null;
+    S.selPieces = S.selPieces.filter(id => me.line.some(c => c.id === id));
+  }
+  render();
+}
+
+// ---------- telas ----------
+function homeHtml() {
+  const pre = esc((new URLSearchParams(location.search).get('sala') || '').toUpperCase());
+  return `<div class="panel"><h3>Seu nome</h3><input id="name" maxlength="20" placeholder="Nome"></div>
+  <div class="panel"><button class="primary" data-b="create">Criar sala</button></div>
+  <div class="panel"><h3>Entrar numa sala</h3><div class="row">
+  <input id="code" maxlength="4" placeholder="CÓDIGO" value="${pre}" style="width:120px;text-transform:uppercase">
+  <button data-b="join">Entrar</button></div></div>`;
+}
+
+function lobbyHtml(st) {
+  return `<div class="panel"><div class="muted">Código da sala</div><div class="code">${esc(st.code)}</div>
+  <div class="muted">Link: ${esc(location.origin + '/?sala=' + st.code)}</div>
+  <h3>Jogadores (${st.members.length}/6)</h3><ol>${st.members.map(n => `<li>${esc(n)}</li>`).join('')}</ol>
+  <div class="row">${st.is_host ? '<button class="primary" data-b="start">Iniciar partida</button>' : '<span class="muted">Aguardando o anfitrião iniciar…</span>'}
+  <button data-b="leave">Sair</button></div></div>`;
+}
+
+function cardHtml(c, o = {}) {
+  const tag = o.k ? 'button' : 'div';
+  const label = NAME[c.type] + (c.color ? ' · ' + c.color : '');
+  return `<${tag} class="card${o.sel ? ' sel' : ''}" ${o.k ? `data-k="${o.k}" data-id="${c.id}"` : ''} style="--c:${COL[c.color] || '#888'}">
+  <span>${ICON[c.type]}</span><small>${label}</small>${o.note ? `<small>${o.note}</small>` : ''}</${tag}>`;
+}
+const pieceNote = c => `R${c.resistance}${c.pinned ? ' 📎' : ''}`;
+
+function gameHtml(st) {
+  const g = st.game, me = 'p' + (st.you_index + 1), mine = g.players[st.you_index];
+  const myTurn = !g.finished && g.current_player === me;
+  const nameOf = id => st.members[parseInt(id.slice(1)) - 1];
+  const w = g.weather_revealed[g.weather_revealed.length - 1];
+  const wtxt = !w ? '—' : w.kind === 'wind' ? `💨 Vento ${w.wind}` : w.kind === 'lightning' ? '⚡ Nuvem Carregada' : '⛈️ TEMPORAL';
+  const can = myTurn && g.actions_left > 0;
+  let h = '';
+
+  if (g.finished) {
+    const r = g.result;
+    h += `<div class="panel turn"><h3>Fim de jogo (${r.reason === 'temporal' ? 'Temporal ⛈️' : '3º relâmpago ⚡'})</h3>
+    <div>${r.draw ? 'Empate entre ' : 'Vencedor: '}<b>${r.winners.map(id => esc(nameOf(id))).join(', ')}</b>${r.tiebreak_by_sheets ? ' (desempate por lençóis)' : ''}</div>
+    <div class="muted">${g.players.map(p => `${esc(nameOf(p.id))}: ${p.score} pts, ${p.sheets_saved} lençol(is)`).join(' · ')}</div>
+    <div class="row" style="margin-top:8px"><button data-b="leave">Sair</button></div></div>`;
+  } else {
+    h += `<div class="panel ${myTurn ? 'turn' : ''}">Turno ${g.turn_number} · Vez de <b>${esc(nameOf(g.current_player))}</b>${myTurn ? ' (você)' : ''}
+    · Ações: ${g.actions_left} · ⚡ ${g.lightning_count}/3 · Clima: ${wtxt}
+    <div class="muted">Baralho de clima: ${g.weather_deck_size} · Baralho de varal: ${g.varal_deck_size}</div></div>`;
+  }
+
+  g.players.forEach((p, i) => {
+    if (i === st.you_index) return;
+    h += `<div class="panel"><h3>${esc(st.members[i])} — ${p.score} pts · mão: ${p.hand_size}</h3>
+    <div class="cards">${p.line.length ? p.line.map(c => cardHtml(c, {note: pieceNote(c)})).join('') : '<span class="muted">varal vazio</span>'}</div>
+    <div class="muted">Cesto: ${p.basket.length} peça(s)</div></div>`;
+  });
+
+  h += `<div class="panel ${myTurn ? 'turn' : ''}"><h3>Seu varal — ${mine.score} pts · lençóis salvos: ${mine.sheets_saved}</h3>
+  <div class="cards">${mine.line.length ? mine.line.map(c => cardHtml(c, {k:'piece', sel:S.selPieces.includes(c.id), note:pieceNote(c)})).join('') : '<span class="muted">varal vazio</span>'}</div>
+  <h3>Sua mão</h3>
+  <div class="cards">${mine.hand.length ? mine.hand.map(c => cardHtml(c, {k:'hand', sel:S.selHand === c.id})).join('') : '<span class="muted">sem cartas</span>'}</div>
+  <div class="row" style="margin-top:10px">
+  <button data-b="hang" ${can ? '' : 'disabled'}>Estender</button>
+  <button data-b="pin" ${can ? '' : 'disabled'}>Prender</button>
+  <button data-b="action" ${can ? '' : 'disabled'}>Jogar ação</button>
+  <button data-b="collect" ${can ? '' : 'disabled'}>Recolher</button>
+  <button data-b="move" ${can ? '' : 'disabled'}>Reposicionar</button>
+  <button class="primary" data-b="end" ${myTurn ? '' : 'disabled'}>Encerrar turno</button></div>
+  <div class="muted" style="margin-top:6px">Selecione carta(s) e peça(s) e clique numa ação. Prender: 1 carta da mão + 1 ou 2 peças adjacentes. Recolher: peças adjacentes que formem um conjunto.</div></div>`;
+
+  h += `<div class="panel"><h3>Registro</h3><div class="log">${st.log.slice(-10).map(l => `<div>${esc(l)}</div>`).join('')}</div></div>`;
+  return h;
+}
+
+function render() {
+  const st = S.state, a = $('#app');
+  if (!S.code || !st) a.innerHTML = homeHtml();
+  else if (!st.started) a.innerHTML = lobbyHtml(st);
+  else a.innerHTML = gameHtml(st);
+}
+
+// ---------- ações ----------
+async function act(body) {
+  setState(await api(`/rooms/${S.code}/actions`, {...body, token:S.token}));
+  S.selHand = null; S.selPieces = []; render();
+}
+
+async function button(b) {
+  const need = (ok, m) => { if (!ok) throw new Error(m); };
+  if (b === 'create' || b === 'join') {
+    const name = ($('#name').value || '').trim();
+    need(name, 'Digite seu nome.');
+    let d;
+    if (b === 'create') d = await api('/rooms', {name});
+    else {
+      const code = ($('#code').value || '').trim().toUpperCase();
+      need(code, 'Digite o código da sala.');
+      d = await api(`/rooms/${encodeURIComponent(code)}/join`, {name});
+    }
+    setSession(d.code, d.token); setState(d.view);
+  } else if (b === 'start') {
+    setState(await api(`/rooms/${S.code}/start`, {token:S.token}));
+  } else if (b === 'leave') {
+    clearSession(); render();
+  } else {
+    const hand = S.selHand, ps = S.selPieces;
+    if (b === 'hang') { need(hand, 'Escolha uma carta da mão.'); await act({type:'hang', card_id:hand}); }
+    else if (b === 'pin') { need(hand, 'Escolha a carta da mão que vira pregador.'); need(ps.length, 'Escolha 1 ou 2 peças do seu varal.'); await act({type:'pin', card_id:hand, piece_ids:ps}); }
+    else if (b === 'action') { need(hand, 'Escolha uma carta de ação na mão.'); await act({type:'play_action', card_id:hand}); }
+    else if (b === 'collect') { need(ps.length, 'Escolha as peças do varal a recolher.'); await act({type:'collect', piece_ids:ps}); }
+    else if (b === 'move') {
+      need(ps.length === 1, 'Escolha 1 peça do varal para mover.');
+      const n = prompt('Nova posição da peça (1 = primeira da esquerda):');
+      if (n === null) return;
+      await act({type:'reposition', piece_id:ps[0], position:parseInt(n, 10) - 1});
+    }
+    else if (b === 'end') await act({type:'end_turn'});
+  }
+}
+
+document.addEventListener('click', async e => {
+  const t = e.target.closest('[data-k],[data-b]');
+  if (!t) return;
+  try {
+    if (t.dataset.k === 'hand') { S.selHand = S.selHand === t.dataset.id ? null : t.dataset.id; render(); }
+    else if (t.dataset.k === 'piece') {
+      const i = S.selPieces.indexOf(t.dataset.id);
+      if (i < 0) S.selPieces.push(t.dataset.id); else S.selPieces.splice(i, 1);
+      render();
+    }
+    else await button(t.dataset.b);
+  } catch (err) { msg(err.message); }
+});
+
+// ---------- atualização periódica (polling) ----------
+let polling = false;
+async function poll() {
+  if (!S.code || polling) return;
+  polling = true;
+  try {
+    const v = await api(`/rooms/${encodeURIComponent(S.code)}?token=${encodeURIComponent(S.token)}`);
+    if (JSON.stringify(v) !== S.json) setState(v);
+  } catch (e) {
+    if (e.status === 404 || e.status === 403) { clearSession(); msg('A sala não existe mais (o servidor pode ter reiniciado).'); render(); }
+  } finally { polling = false; }
+}
+setInterval(poll, 1500);
+render();
+poll();
+</script>
+</body>
+</html>
